@@ -3,6 +3,7 @@
  * - 数据库名：gbbrinepond
  * - v1：建立全部表与 pondId+date 复合索引
  * - v2：新增 evapMm 字段并写入升级迁移逻辑，旧记录自动补齐默认值
+ * - v3：新增 releases 放水登记表（值守员台账），并为老走水计划按计划量补一份默认放水记录
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
 import Dexie, { type Table } from 'dexie';
@@ -11,6 +12,7 @@ import type { Gate } from '../types/gate';
 import type { Observation } from '../types/observation';
 import type { Assay } from '../types/assay';
 import type { Schedule, ScheduleState } from '../types/schedule';
+import type { Release } from '../types/release';
 import { estimateEvapMm } from './brine';
 import { nowIso } from './id';
 import { seedDatabase } from './seed';
@@ -19,10 +21,30 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbbrinepond';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
+
+/**
+ * 老计划没登记放水量：升级 / 导入旧档时按旧计划量补一份默认放水记录，
+ * 值守员台账与调度计划两边都能对上账（id 固定，重复执行幂等）。
+ */
+export function defaultReleaseForSchedule(schedule: Pick<Schedule, 'id' | 'pondId' | 'planDate' | 'volumeM3'>): Release {
+  const stamp = nowIso();
+  return {
+    id: `release-migrate-${schedule.id}`,
+    pondId: schedule.pondId,
+    gateId: '',
+    date: schedule.planDate,
+    volumeM3: schedule.volumeM3,
+    keeper: '系统补登',
+    note: '结构升级 v3：老计划未登记放水量，按旧计划量补一份默认',
+    createdAt: stamp,
+    updatedAt: stamp,
+    revision: ROW_REVISION,
+  };
+}
 
 class BrinePondDatabase extends Dexie {
   ponds!: Table<Pond, string>;
@@ -30,6 +52,7 @@ class BrinePondDatabase extends Dexie {
   observations!: Table<Observation, string>;
   assays!: Table<Assay, string>;
   schedules!: Table<Schedule, string>;
+  releases!: Table<Release, string>;
 
   constructor() {
     super(DB_NAME);
@@ -44,7 +67,7 @@ class BrinePondDatabase extends Dexie {
     });
 
     // ---------- v2：新增 evapMm 字段，并为旧记录补齐默认值 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         ponds: 'id, code, seriesName, stage, status, createdAt, updatedAt',
         gates: 'id, fromPondId, toPondId, state, openingPct',
@@ -90,6 +113,19 @@ class BrinePondDatabase extends Dexie {
           }
         });
       });
+
+    // ---------- v3：新增放水登记表，老计划按计划量补一份默认放水记录 ----------
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        releases: 'id, pondId, gateId, date, [pondId+date]',
+      })
+      .upgrade(async (tx) => {
+        const schedules = (await tx.table('schedules').toArray()) as Schedule[];
+        if (schedules.length === 0) return;
+        const defaults = schedules.map((schedule) => defaultReleaseForSchedule(schedule));
+        // bulkPut 而非 bulkAdd：固定 id 下重复执行（如导入旧档触发）不会产生重复记录
+        await tx.table('releases').bulkPut(defaults);
+      });
   }
 }
 
@@ -127,15 +163,16 @@ export async function putPond(row: Pond): Promise<void> {
   await db.ponds.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION });
 }
 
-/** 删除蒸发池，并级联清理相关闸门、观测、化验与走水计划 */
+/** 删除蒸发池，并级联清理相关闸门、观测、化验、走水计划与放水登记 */
 export async function removePond(id: string): Promise<void> {
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
+  await db.transaction('rw', [db.ponds, db.gates, db.observations, db.assays, db.schedules, db.releases], async () => {
     const gates = await db.gates.toArray();
     const related = gates.filter((gate) => gate.fromPondId === id || gate.toPondId === id).map((gate) => gate.id);
     if (related.length > 0) await db.gates.bulkDelete(related);
     await db.observations.where('pondId').equals(id).delete();
     await db.assays.where('pondId').equals(id).delete();
     await db.schedules.where('pondId').equals(id).delete();
+    await db.releases.where('pondId').equals(id).delete();
     await db.ponds.delete(id);
   });
 }
@@ -274,6 +311,40 @@ export async function advanceScheduleState(scheduleId: string, next: ScheduleSta
   await db.schedules.update(scheduleId, { state: next, updatedAt: nowIso() });
 }
 
+/* ------------------------------ 放水登记（值守员台账） ------------------------------ */
+
+export async function listReleases(): Promise<Release[]> {
+  const rows = await db.releases.toArray();
+  return rows.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+/** 按池和日期取放水登记（对账专用） */
+export async function listReleasesByPondDate(pondId: string, date: string): Promise<Release[]> {
+  return db.releases.where('[pondId+date]').equals([pondId, date]).toArray();
+}
+
+/**
+ * 写入放水登记：同一闸门同日仅保留一条（存在即覆盖）；
+ * 不指定闸门（池口直排）时按同池同日无闸门的记录覆盖。
+ */
+export async function upsertRelease(row: Release): Promise<Release> {
+  const candidates = await db.releases.where('[pondId+date]').equals([row.pondId, row.date]).toArray();
+  const existing = candidates.find((item) => item.gateId === row.gateId);
+  const next: Release = {
+    ...row,
+    id: existing === undefined ? row.id : existing.id,
+    createdAt: existing === undefined ? row.createdAt : existing.createdAt,
+    updatedAt: nowIso(),
+    revision: ROW_REVISION,
+  };
+  await db.releases.put(next);
+  return next;
+}
+
+export async function removeRelease(id: string): Promise<void> {
+  await db.releases.delete(id);
+}
+
 /* ---------------------------- 整库快照 ---------------------------- */
 
 export interface DatabaseSnapshot {
@@ -285,56 +356,75 @@ export interface DatabaseSnapshot {
   observations: Observation[];
   assays: Assay[];
   schedules: Schedule[];
+  releases: Release[];
 }
 
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [ponds, gates, observations, assays, schedules] = await Promise.all([
+  const [ponds, gates, observations, assays, schedules, releases] = await Promise.all([
     db.ponds.toArray(),
     db.gates.toArray(),
     db.observations.toArray(),
     db.assays.toArray(),
     db.schedules.toArray(),
+    db.releases.toArray(),
   ]);
-  return { name: DB_NAME, schemaVersion: DB_SCHEMA_VERSION, exportedAt: nowIso(), ponds, gates, observations, assays, schedules };
+  return {
+    name: DB_NAME,
+    schemaVersion: DB_SCHEMA_VERSION,
+    exportedAt: nowIso(),
+    ponds,
+    gates,
+    observations,
+    assays,
+    schedules,
+    releases,
+  };
 }
 
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
+  // 旧版存档没有放水登记表：按旧计划量补一份默认，保证导入后账实相符
+  const releases =
+    snapshot.releases === undefined ? snapshot.schedules.map((schedule) => defaultReleaseForSchedule(schedule)) : snapshot.releases;
+  await db.transaction('rw', [db.ponds, db.gates, db.observations, db.assays, db.schedules, db.releases], async () => {
     await Promise.all([
       db.ponds.clear(),
       db.gates.clear(),
       db.observations.clear(),
       db.assays.clear(),
       db.schedules.clear(),
+      db.releases.clear(),
     ]);
     await db.ponds.bulkPut(snapshot.ponds.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.gates.bulkPut(snapshot.gates.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.observations.bulkPut(snapshot.observations.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.assays.bulkPut(snapshot.assays.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.schedules.bulkPut(snapshot.schedules.map((row) => ({ ...row, revision: ROW_REVISION })));
+    await db.releases.bulkPut(releases.map((row) => ({ ...row, revision: ROW_REVISION })));
   });
 }
 
 export async function resetDatabase(): Promise<void> {
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
+  await db.transaction('rw', [db.ponds, db.gates, db.observations, db.assays, db.schedules, db.releases], async () => {
     await Promise.all([
       db.ponds.clear(),
       db.gates.clear(),
       db.observations.clear(),
       db.assays.clear(),
       db.schedules.clear(),
+      db.releases.clear(),
     ]);
   });
   await seedDatabase();
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [ponds, gates, observations, assays, schedules] = await Promise.all([
+  const [ponds, gates, observations, assays, schedules, releases] = await Promise.all([
     db.ponds.count(),
     db.gates.count(),
     db.observations.count(),
     db.assays.count(),
     db.schedules.count(),
+    db.releases.count(),
   ]);
-  return { ponds, gates, observations, assays, schedules };
+  return { ponds, gates, observations, assays, schedules, releases };
 }

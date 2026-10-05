@@ -1,7 +1,7 @@
 /**
  * 演示数据播种（幂等）
- * 父 → 子 → 孙三层链路：蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排
- * 所有 id 固定，保证 /gates、/observations、/assays、/schedules 打开就有真实串级与数据。
+ * 父 → 子 → 孙三层链路：蒸发池 → 闸门串级 / 卤水日观测 → 离子组分分析 → 走水编排 → 放水登记
+ * 所有 id 固定，保证 /gates、/observations、/assays、/schedules、/releases 打开就有真实串级与数据。
  */
 import { db, ROW_REVISION } from './db';
 import type { Pond } from '../types/pond';
@@ -9,6 +9,7 @@ import type { Gate } from '../types/gate';
 import type { Observation } from '../types/observation';
 import type { Assay } from '../types/assay';
 import type { Schedule } from '../types/schedule';
+import type { Release } from '../types/release';
 import { autoVerdict, estimateEvapMm } from './brine';
 
 const SEED_TIME = '2026-09-01T00:30:00.000Z';
@@ -137,11 +138,22 @@ export async function seedDatabase(): Promise<void> {
     wrap<Schedule>({ id: 'schedule-e1', pondId: SEED_IDS.pondE, planDate: '2026-09-28', targetDensity: 1.15, volumeM3: 700, operator: '王锐', state: '已出卤', orderIndex: 5 }),
   ];
 
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
+  // ---------------- 放水登记（值守员台账，与走水计划按池+日期对账） ----------------
+  // schedule-d1 实放 1450 vs 计划 1600：故意差 150 m³，用于演示「对不上先压住不给出卤」；
+  // schedule-c1（待排）暂无登记：演示「未登记放水量」也被压住。
+  const releases: Release[] = [
+    wrap<Release>({ id: 'release-a1', pondId: SEED_IDS.pondA, gateId: 'gate-a-b', date: '2026-10-02', volumeM3: 1200, keeper: '赵根生', note: '主走水通道一次放足' }),
+    wrap<Release>({ id: 'release-d1', pondId: SEED_IDS.pondD, gateId: 'gate-d-e', date: '2026-10-04', volumeM3: 1450, keeper: '赵根生', note: '闸门开度不足，欠放 150 m³ 待补' }),
+    wrap<Release>({ id: 'release-b1', pondId: SEED_IDS.pondB, gateId: 'gate-b-c', date: '2026-10-06', volumeM3: 900, keeper: '孙守成', note: '' }),
+    wrap<Release>({ id: 'release-e1', pondId: SEED_IDS.pondE, gateId: '', date: '2026-09-28', volumeM3: 700, keeper: '孙守成', note: '出卤口直排，不经过串级闸门' }),
+  ];
+
+  await db.transaction('rw', [db.ponds, db.gates, db.observations, db.assays, db.schedules, db.releases], async () => {
     await db.ponds.bulkPut(ponds);
     await db.gates.bulkPut(gates);
     await db.observations.bulkPut(observations);
     await db.assays.bulkPut(assays);
     await db.schedules.bulkPut(schedules);
+    await db.releases.bulkPut(releases);
   });
 }

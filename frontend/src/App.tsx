@@ -24,6 +24,7 @@ export default function App(props: RouteSectionProps) {
     observations: pondStore.state.counts.observations ?? 0,
     assays: pondStore.state.counts.assays ?? 0,
     schedules: pondStore.state.counts.schedules ?? 0,
+    releases: pondStore.state.counts.releases ?? 0,
   });
 
   const currentSeries = () => pondStore.state.currentSeries ?? '全部池系';
@@ -44,6 +45,7 @@ export default function App(props: RouteSectionProps) {
           <span class="rounded-full bg-white/15 px-2.5 py-1">当前池系：{currentSeries()}</span>
           <span class="rounded-full bg-white/15 px-2.5 py-1">池 {counts().ponds} 口</span>
           <span class="rounded-full bg-white/15 px-2.5 py-1">闸门 {counts().gates} 条</span>
+          <span class="rounded-full bg-white/15 px-2.5 py-1">放水 {counts().releases} 条</span>
           <span class="rounded-full bg-white/15 px-2.5 py-1">观测 {counts().observations} 条</span>
           <span class="rounded-full bg-white/15 px-2.5 py-1">化验 {counts().assays} 条</span>
           <span class="rounded-full bg-white/15 px-2.5 py-1">走水 {counts().schedules} 条</span>
@@ -71,8 +73,8 @@ export default function App(props: RouteSectionProps) {
 
           <div class="mt-4 hidden rounded-lg border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500 lg:block">
             <p class="mb-1 font-semibold text-slate-700">数据存储</p>
-            <p>库名 gbbrinepond（IndexedDB / Dexie），结构版本 v2。</p>
-            <p class="mt-1">v1 建表与 pondId+date 复合索引；v2 新增 evapMm 并迁移旧记录。</p>
+            <p>库名 gbbrinepond（IndexedDB / Dexie），结构版本 v3。</p>
+            <p class="mt-1">v1 建表与 pondId+date 复合索引；v2 新增 evapMm 并迁移旧记录；v3 新增放水登记表，老计划按计划量补默认放水记录。</p>
           </div>
         </nav>
 

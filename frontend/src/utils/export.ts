@@ -71,6 +71,10 @@ export function parseSnapshot(text: string): SnapshotParseResult {
       return { ok: false, message: `存档缺少 ${String(key)} 数组。`, snapshot: null };
     }
   }
+  // releases 为 v3 新增表：旧版存档允许缺省（导入时按旧计划量补默认放水记录），存在则必须是数组
+  if (data.releases !== undefined && !Array.isArray(data.releases)) {
+    return { ok: false, message: '存档 releases 字段格式不正确。', snapshot: null };
+  }
   return { ok: true, message: '存档校验通过。', snapshot: data as DatabaseSnapshot };
 }
 

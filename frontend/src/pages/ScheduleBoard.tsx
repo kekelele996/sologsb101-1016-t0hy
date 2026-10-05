@@ -1,7 +1,8 @@
 /**
  * /schedules 走水与出卤编排
  * 按日期排序、拖拽调整走水先后顺序、逐条推进状态；出卤完成回写池阶段与实际密度。
- * 消费模型：Schedule、Gate、Assay；复用组件：<FilterBar>、<EmptyPanel>、<StatBadge>
+ * 出卤前按「池 + 日期」与值守侧放水登记对账，对不上的走水压住不给出卤，并在计划旁写清差多少。
+ * 消费模型：Schedule、Gate、Assay、Release；复用组件：<FilterBar>、<EmptyPanel>、<StatBadge>
  */
 import { For, Show, createMemo, createSignal, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
@@ -11,9 +12,11 @@ import FilterBar from '../components/common/FilterBar';
 import StatBadge from '../components/common/StatBadge';
 import StageTag from '../components/common/StageTag';
 import { usePondStore } from '../stores/pondStore';
+import { useReleaseStore } from '../stores/releaseStore';
 import { useScheduleStore } from '../stores/scheduleStore';
 import { SCHEDULE_STATE_OPTIONS, type Schedule, type ScheduleDraft, type ScheduleState } from '../types/schedule';
 import { effectiveVerdict } from '../utils/brine';
+import { formatDiffM3, reconcileSchedule, releasesForSlot } from '../utils/reconcile';
 import { today } from '../utils/id';
 
 const INPUT =
@@ -46,6 +49,7 @@ function emptyDraft(pondId: string, orderIndex: number): ScheduleDraft {
 export default function ScheduleBoard() {
   const pondStore = usePondStore();
   const scheduleStore = useScheduleStore();
+  const releaseStore = useReleaseStore();
 
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editingId, setEditingId] = createSignal<string | null>(null);
@@ -84,6 +88,10 @@ export default function ScheduleBoard() {
     });
   });
 
+  /** 单条计划的对账结果：按池 + 计划日期汇总值守侧实放量 */
+  const reconOf = (row: Schedule) =>
+    reconcileSchedule(row, releasesForSlot(releaseStore.rows(), row.pondId, row.planDate));
+
   const stats = createMemo(() => {
     const list = ordered();
     return {
@@ -91,6 +99,7 @@ export default function ScheduleBoard() {
       pending: list.filter((row) => row.state === '待排').length,
       running: list.filter((row) => row.state === '走水中').length,
       done: list.filter((row) => row.state === '已出卤').length,
+      blocked: list.filter((row) => row.state !== '已出卤' && row.state !== '待排' && !reconOf(row).matched).length,
       volume: Math.round(list.reduce((acc, row) => acc + row.volumeM3, 0) * 10) / 10,
       donePct: list.length === 0 ? 0 : Math.round((list.filter((row) => row.state === '已出卤').length / list.length) * 1000) / 10,
     };
@@ -160,6 +169,13 @@ export default function ScheduleBoard() {
         <StatBadge label="待排" value={stats().pending} suffix="条" tone="default" />
         <StatBadge label="走水中" value={stats().running} suffix="条" tone="warning" />
         <StatBadge label="已出卤" value={stats().done} suffix="条" tone="success" />
+        <StatBadge
+          label="对账压住"
+          value={stats().blocked}
+          suffix="条"
+          tone="danger"
+          hint="实放量与计划量对不上、被压住不给出卤的走水"
+        />
         <StatBadge label="计划总量" value={stats().volume} suffix="m³" tone="info" />
         <StatBadge label="出卤完成率" value={`${stats().donePct}%`} percent={stats().donePct} tone="success" />
       </div>
@@ -243,6 +259,33 @@ export default function ScheduleBoard() {
                   </div>
                   <div class="text-xs text-slate-600">
                     <p>
+                      计划量 <span class="tabular-nums font-medium text-slate-800">{row.volumeM3}</span> m³
+                    </p>
+                    <p>
+                      实放{' '}
+                      <span class="tabular-nums font-medium text-brine-700">
+                        {reconOf(row).hasRecords ? `${reconOf(row).releasedM3} m³` : '—'}
+                      </span>{' '}
+                      <span
+                        class={`rounded border px-1 py-px text-[11px] ${
+                          !reconOf(row).hasRecords
+                            ? 'border-slate-300 bg-slate-100 text-slate-500'
+                            : reconOf(row).matched
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                              : 'border-rose-300 bg-rose-50 text-rose-700'
+                        }`}
+                        title="按池 + 计划日期与值守侧放水登记对账"
+                      >
+                        {!reconOf(row).hasRecords
+                          ? '未登记'
+                          : reconOf(row).matched
+                            ? '账实相符'
+                            : `差 ${formatDiffM3(reconOf(row).diffM3)} m³`}
+                      </span>
+                    </p>
+                  </div>
+                  <div class="text-xs text-slate-600">
+                    <p>
                       目标密度 <span class="tabular-nums font-medium text-slate-800">{row.targetDensity}</span> g/cm³
                     </p>
                     <p>
@@ -253,9 +296,6 @@ export default function ScheduleBoard() {
                     </p>
                   </div>
                   <div class="text-xs text-slate-600">
-                    <p>
-                      计划量 <span class="tabular-nums font-medium text-slate-800">{row.volumeM3}</span> m³
-                    </p>
                     <p>
                       组分判定{' '}
                       <span class="font-medium text-slate-800">
@@ -273,9 +313,12 @@ export default function ScheduleBoard() {
                     <button
                       class="rounded-md border border-brine-300 bg-brine-50 px-2.5 py-1 text-xs text-brine-700 transition hover:bg-brine-100 disabled:opacity-50"
                       disabled={row.state === '已出卤'}
+                      title={row.state === '走水中' ? '出卤前按池 + 日期与放水登记对账，对不上会压住' : undefined}
                       onClick={async () => {
-                        const next = await scheduleStore.advance(row.id);
-                        if (next === null) scheduleStore.setMessage('该计划已处于「已出卤」状态');
+                        const result = await scheduleStore.advance(row.id);
+                        // blocked 时 store 已写清差额与处理指引，这里不再覆盖
+                        if (result.blocked) return;
+                        if (result.next === null) scheduleStore.setMessage('该计划已处于「已出卤」状态');
                       }}
                     >
                       {nextStateLabel(row.state)}
@@ -380,6 +423,8 @@ export default function ScheduleBoard() {
         </div>
         <p class="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">
           状态推进到「已出卤」时，会把该池推进到下一蒸发阶段，并把最新一次观测的密度回写为当前实际密度。
+          出卤前会按「池 + 计划日期」与值守侧的放水登记对账：实放量与计划量对不上的走水会被压住，
+          计划照旧保留，等值守员核对修正后再重试。
         </p>
       </AppDialog>
 
