@@ -6,7 +6,9 @@
  * - 池体积与闸门过流估算
  */
 import type { Assay, AssayVerdict } from '../types/assay';
+import type { DischargeRecord } from '../types/discharge';
 import type { Gate } from '../types/gate';
+import type { Schedule } from '../types/schedule';
 
 /** 保留 1 位小数 */
 export function round1(value: number): number {
@@ -132,4 +134,73 @@ export function effectiveVerdict(assay: Pick<Assay, 'verdict' | 'verdictManual' 
 /** 密度是否达到目标（用于判断走水是否可以出卤） */
 export function densityReached(currentDensity: number, targetDensity: number): boolean {
   return currentDensity >= targetDensity;
+}
+
+/* ------------------------------ 放水对账 ------------------------------ */
+
+/**
+ * 计划量与实际放水量的容差（m³）。
+ * 差值绝对值 ≤ 容差视为对得上，避免浮点尾差导致正常走水被压住。
+ */
+export const DISCHARGE_TOLERANCE_M3 = 0.5;
+
+/** 对账结果：按池 + 日期把调度员的计划量与值守员的实际放水量比对 */
+export interface ReconciliationResult {
+  scheduleId: string;
+  pondId: string;
+  date: string;
+  /** 计划量（m³） */
+  planVolume: number;
+  /** 实际放水量（m³）；没有值守记录时为 null */
+  actualVolume: number | null;
+  /** 差额 = 实际 − 计划（m³）；没有值守记录时为 null */
+  diff: number | null;
+  /** 是否已有值守放水记录 */
+  hasRecord: boolean;
+  /** 计划量与实际放水量是否对得上（|差额| ≤ 容差） */
+  matched: boolean;
+  /** 是否应压住出卤（无记录或对不上） */
+  blocked: boolean;
+}
+
+/**
+ * 对账：把一条走水计划与同池同日的值守放水记录比对。
+ * 对不上（或没有值守记录）时 blocked = true，出卤按钮应被压住。
+ */
+export function reconcileDischarge(
+  schedule: Pick<Schedule, 'id' | 'pondId' | 'planDate' | 'volumeM3'>,
+  discharge: DischargeRecord | null | undefined,
+): ReconciliationResult {
+  const hasRecord = discharge !== null && discharge !== undefined;
+  const actualVolume = hasRecord ? discharge.volumeM3 : null;
+  const diff = actualVolume === null ? null : round1(actualVolume - schedule.volumeM3);
+  const matched = diff !== null && Math.abs(diff) <= DISCHARGE_TOLERANCE_M3;
+  return {
+    scheduleId: schedule.id,
+    pondId: schedule.pondId,
+    date: schedule.planDate,
+    planVolume: schedule.volumeM3,
+    actualVolume,
+    diff,
+    hasRecord,
+    matched,
+    blocked: !hasRecord || !matched,
+  };
+}
+
+/** 在一组值守记录中按 [pondId+date] 查找（同池同日仅一条） */
+export function findDischarge(
+  discharges: DischargeRecord[],
+  pondId: string,
+  date: string,
+): DischargeRecord | null {
+  return discharges.find((row) => row.pondId === pondId && row.date === date) ?? null;
+}
+
+/** 差额展示文案：带正负号与颜色语义（对不上为红，对得上为绿） */
+export function formatDiff(diff: number | null): { text: string; tone: 'match' | 'over' | 'under' | 'none' } {
+  if (diff === null) return { text: '未登记', tone: 'none' };
+  if (Math.abs(diff) <= DISCHARGE_TOLERANCE_M3) return { text: '±0', tone: 'match' };
+  const sign = diff > 0 ? '+' : '';
+  return { text: `${sign}${round1(diff)} m³`, tone: diff > 0 ? 'over' : 'under' };
 }

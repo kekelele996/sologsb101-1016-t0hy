@@ -9,6 +9,7 @@ import type { Gate } from '../types/gate';
 import type { Observation } from '../types/observation';
 import type { Assay } from '../types/assay';
 import type { Schedule } from '../types/schedule';
+import type { DischargeRecord } from '../types/discharge';
 import { autoVerdict, estimateEvapMm } from './brine';
 
 const SEED_TIME = '2026-09-01T00:30:00.000Z';
@@ -74,6 +75,18 @@ function assay(
   });
 }
 
+/** 生成值守放水记录（值守员侧的实际放水量，与调度员计划分开记账） */
+function discharge(
+  id: string,
+  pondId: string,
+  date: string,
+  volumeM3: number,
+  operator: string,
+  note = '',
+): DischargeRecord {
+  return wrap<DischargeRecord>({ id, pondId, date, volumeM3, operator, note });
+}
+
 export async function seedDatabase(): Promise<void> {
   const exists = await db.ponds.count();
   if (exists > 0) return;
@@ -131,17 +144,27 @@ export async function seedDatabase(): Promise<void> {
   // ---------------- 走水编排（覆盖四种状态，orderIndex 决定先后） ----------------
   const schedules: Schedule[] = [
     wrap<Schedule>({ id: 'schedule-a1', pondId: SEED_IDS.pondA, planDate: '2026-10-02', targetDensity: 1.115, volumeM3: 1200, operator: '韩江', state: '已排', orderIndex: 1 }),
-    wrap<Schedule>({ id: 'schedule-d1', pondId: SEED_IDS.pondD, planDate: '2026-10-04', targetDensity: 1.098, volumeM3: 1600, operator: '王锐', state: '已排', orderIndex: 2 }),
+    wrap<Schedule>({ id: 'schedule-d1', pondId: SEED_IDS.pondD, planDate: '2026-10-04', targetDensity: 1.098, volumeM3: 1600, operator: '王锐', state: '走水中', orderIndex: 2 }),
     wrap<Schedule>({ id: 'schedule-b1', pondId: SEED_IDS.pondB, planDate: '2026-10-06', targetDensity: 1.175, volumeM3: 900, operator: '韩江', state: '走水中', orderIndex: 3 }),
     wrap<Schedule>({ id: 'schedule-c1', pondId: SEED_IDS.pondC, planDate: '2026-10-12', targetDensity: 1.255, volumeM3: 600, operator: '李文', state: '待排', orderIndex: 4 }),
     wrap<Schedule>({ id: 'schedule-e1', pondId: SEED_IDS.pondE, planDate: '2026-09-28', targetDensity: 1.15, volumeM3: 700, operator: '王锐', state: '已出卤', orderIndex: 5 }),
   ];
 
-  await db.transaction('rw', db.ponds, db.gates, db.observations, db.assays, db.schedules, async () => {
+  // ---------------- 值守放水记录（值守员侧，与计划分开记账） ----------------
+  // a1 对得上；d1 对不上（计划 1600，实际 1450，差 −150）；b1 对得上；c1 没登记；e1 对得上（已出卤）
+  const discharges: DischargeRecord[] = [
+    discharge('discharge-a1', SEED_IDS.pondA, '2026-10-02', 1200, '韩江', '北部一系主走水通道'),
+    discharge('discharge-d1', SEED_IDS.pondD, '2026-10-04', 1450, '王锐', '南部二系主走水通道，实际放水量偏少'),
+    discharge('discharge-b1', SEED_IDS.pondB, '2026-10-06', 900, '韩江', '进入锂盐阶段前的控流闸'),
+    discharge('discharge-e1', SEED_IDS.pondE, '2026-09-28', 700, '王锐', '已出卤，对账一致'),
+  ];
+
+  await db.transaction('rw', [db.ponds, db.gates, db.observations, db.assays, db.schedules, db.discharges], async () => {
     await db.ponds.bulkPut(ponds);
     await db.gates.bulkPut(gates);
     await db.observations.bulkPut(observations);
     await db.assays.bulkPut(assays);
     await db.schedules.bulkPut(schedules);
+    await db.discharges.bulkPut(discharges);
   });
 }

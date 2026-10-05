@@ -5,6 +5,7 @@
  */
 import { For, Show, createMemo, createSignal, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
+import { A } from '@solidjs/router';
 import AppDialog from '../components/common/AppDialog';
 import EmptyPanel from '../components/common/EmptyPanel';
 import FilterBar from '../components/common/FilterBar';
@@ -13,7 +14,8 @@ import StageTag from '../components/common/StageTag';
 import { usePondStore } from '../stores/pondStore';
 import { useScheduleStore } from '../stores/scheduleStore';
 import { SCHEDULE_STATE_OPTIONS, type Schedule, type ScheduleDraft, type ScheduleState } from '../types/schedule';
-import { effectiveVerdict } from '../utils/brine';
+import { effectiveVerdict, formatDiff } from '../utils/brine';
+import { ROUTES } from '../router';
 import { today } from '../utils/id';
 
 const INPUT =
@@ -268,11 +270,44 @@ export default function ScheduleBoard() {
                       </span>
                     </p>
                   </div>
+                  <div class="text-xs">
+                    {(() => {
+                      const rec = scheduleStore.reconciliationOf(row.id);
+                      if (rec === null) return <span class="text-slate-400">—</span>;
+                      if (!rec.hasRecord) {
+                        return (
+                          <p class="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-amber-700">
+                            实际放水量 <span class="font-medium">未登记</span>
+                            <A href={ROUTES.discharges} class="ml-1 underline">去补登</A>
+                          </p>
+                        );
+                      }
+                      const diff = formatDiff(rec.diff);
+                      const toneClass =
+                        diff.tone === 'match'
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                          : diff.tone === 'over'
+                            ? 'border-rose-300 bg-rose-50 text-rose-700'
+                            : 'border-amber-300 bg-amber-50 text-amber-700';
+                      return (
+                        <p class={`rounded border px-2 py-1 ${toneClass}`}>
+                          实际放水量 <span class="font-medium tabular-nums">{rec.actualVolume}</span> m³
+                          <span class="mx-1 text-slate-400">/</span>
+                          差额 <span class="font-medium tabular-nums">{diff.text}</span>
+                        </p>
+                      );
+                    })()}
+                  </div>
                   <span class={`rounded border px-2 py-0.5 text-[11px] ${STATE_STYLE[row.state]}`}>{row.state}</span>
                   <div class="flex flex-wrap items-center gap-2">
                     <button
-                      class="rounded-md border border-brine-300 bg-brine-50 px-2.5 py-1 text-xs text-brine-700 transition hover:bg-brine-100 disabled:opacity-50"
-                      disabled={row.state === '已出卤'}
+                      class="rounded-md border border-brine-300 bg-brine-50 px-2.5 py-1 text-xs text-brine-700 transition hover:bg-brine-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={row.state === '已出卤' || (row.state === '走水中' && scheduleStore.reconciliationOf(row.id)?.blocked === true)}
+                      title={
+                        row.state === '走水中' && scheduleStore.reconciliationOf(row.id)?.blocked
+                          ? '放水量与计划量对不上，已压住出卤；请让值守员核对重试'
+                          : undefined
+                      }
                       onClick={async () => {
                         const next = await scheduleStore.advance(row.id);
                         if (next === null) scheduleStore.setMessage('该计划已处于「已出卤」状态');
@@ -280,6 +315,14 @@ export default function ScheduleBoard() {
                     >
                       {nextStateLabel(row.state)}
                     </button>
+                    <Show when={row.state === '走水中' && scheduleStore.reconciliationOf(row.id)?.blocked === true}>
+                      <A
+                        href={ROUTES.discharges}
+                        class="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs text-amber-700 transition hover:bg-amber-100"
+                      >
+                        值守重试
+                      </A>
+                    </Show>
                     <button class="text-xs text-brine-700 hover:underline" onClick={() => openEdit(row)}>
                       编辑
                     </button>

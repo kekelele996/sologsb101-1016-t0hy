@@ -65,11 +65,16 @@ export function parseSnapshot(text: string): SnapshotParseResult {
       snapshot: null,
     };
   }
+  // discharges 为 v3 新增字段：v2 及更早的存档没有该数组，校验时不报错，
+  // 由 importSnapshot 按旧计划量补默认值守记录（与升级迁移逻辑一致）。
   const keys: Array<keyof DatabaseSnapshot> = ['ponds', 'gates', 'observations', 'assays', 'schedules'];
   for (const key of keys) {
     if (!Array.isArray(data[key])) {
       return { ok: false, message: `存档缺少 ${String(key)} 数组。`, snapshot: null };
     }
+  }
+  if (data.discharges !== undefined && !Array.isArray(data.discharges)) {
+    return { ok: false, message: '存档 discharges 字段格式不正确。', snapshot: null };
   }
   return { ok: true, message: '存档校验通过。', snapshot: data as DatabaseSnapshot };
 }
